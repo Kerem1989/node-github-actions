@@ -3,8 +3,16 @@ name: CI
 on:
   push:
     branches: [main]
+    paths-ignore:
+      - '**.md'
+      - 'docs/**'
+      - '.idea/**'
   pull_request:
     branches: [main]
+    paths-ignore:
+      - '**.md'
+      - 'docs/**'
+      - '.idea/**'
   workflow_dispatch:
 
 concurrency:
@@ -14,21 +22,110 @@ concurrency:
 permissions:
   contents: read
 
+env:
+  NODE_VERSION: 22.x
+
 jobs:
-  build:
+  # Unit and integration tests run in parallel, each on its own runner.
+  test:
+    name: ${{ matrix.suite }} tests
     runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: true
+      matrix:
+        suite: [unit, integration]
     steps:
       - name: Checkout the code
-        uses: actions/checkout@v2
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      # Cache the npm download cache. Works with or without a lockfile
+      # (setup-node's built-in `cache: npm` requires one).
+      - name: Cache npm
+        uses: actions/cache@v4
+        with:
+          path: ~/.npm
+          key: npm-${{ runner.os }}-${{ hashFiles('package-lock.json', 'package.json') }}
+          restore-keys: npm-${{ runner.os }}-
+
+      - name: Install dependencies
+        run: |
+          if [ -f package-lock.json ]; then
+            npm ci --prefer-offline --no-audit --no-fund
+          else
+            npm install --prefer-offline --no-audit --no-fund
+          fi
+
       - name: Build the application
         run: echo 'Building the application'
-      - name: Run unit tests
-        run: echo 'Running unit tests'
-      - name: Run integration tests
-        run: echo 'Running integration tests'
-      - name: Build docker image
-        run: echo 'Building the docker image'
-      - name: Push docker image
-        run: echo 'Pushing the docker image to the registry'
+
+      - name: Run ${{ matrix.suite }} tests
+        run: echo 'Running ${{ matrix.suite }} tests'
+
+  # Builds the image in parallel with the tests; layers are cached in the
+  # GitHub Actions cache so unchanged layers are reused between runs.
+  image:
+    name: Docker image
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      packages: write
+    outputs:
+      tag: ${{ steps.meta.outputs.version }}
+    steps:
+      - name: Checkout the code
+        uses: actions/checkout@v4
+
+      - name: No Dockerfile yet
+        if: hashFiles('Dockerfile') == ''
+        run: echo 'No Dockerfile found, skipping the docker image build'
+
+      - name: Set up Docker Buildx
+        if: hashFiles('Dockerfile') != ''
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GitHub Container Registry
+        if: hashFiles('Dockerfile') != '' && github.event_name == 'push' && github.ref == 'refs/heads/main'
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Docker metadata
+        id: meta
+        if: hashFiles('Dockerfile') != ''
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/${{ github.repository }}
+          tags: |
+            type=sha,format=long
+            type=raw,value=latest,enable={{is_default_branch}}
+
+      - name: Build and push docker image
+        if: hashFiles('Dockerfile') != ''
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  deploy:
+    name: Deploy
+    needs: [test, image]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    environment: production
+    steps:
       - name: Deploy the application
-        run: echo 'Deploying the application to the kubernetes cluster'
+        run: echo 'Deploying image ${{ needs.image.outputs.tag }} to the kubernetes cluster'
