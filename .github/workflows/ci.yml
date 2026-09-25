@@ -1,0 +1,34 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout the code
+        uses: actions/checkout@v2
+      - name: Build the application
+        run: echo 'Building the application'
+      - name: Run unit tests
+        run: echo 'Running unit tests'
+      - name: Run integration tests
+        run: echo 'Running integration tests'
+      - name: Build docker image
+        run: echo 'Building the docker image'
+      - name: Push docker image
+        run: echo 'Pushing the docker image to the registry'
+      - name: Deploy the application
+        run: echo 'Deploying the application to the kubernetes cluster'
